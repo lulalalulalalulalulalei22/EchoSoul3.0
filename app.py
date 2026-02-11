@@ -6,8 +6,8 @@ import streamlit as st
 from openai import OpenAI
 import html
 from datetime import datetime
-from ai_brain import generate_system_prompt
-from ui_style import apply_theme
+from ai_brain import generate_system_prompt, get_ai_response
+from ui_style import inject_ui_styles,render_message
 
 # ==================== 页面配置 ====================
 st.set_page_config(
@@ -19,7 +19,7 @@ st.set_page_config(
 
 # ==================== 自定义样式 ====================
 
-apply_theme(bg_image="D:\Echosoulaicompanion\assets\background.png")
+inject_ui_styles(bg_image_rel_path="assets/background.png")
 # ==================== API 配置 (完善版) ====================
 
 # 1. 这里的第二个参数千万不能放真实的 Key，只能放空字符串 "" 或者 None
@@ -155,43 +155,105 @@ if st.session_state.user_desc:
 # ==================== 聊天界面 ====================
 
 # 显示历史消息
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+# 找到这一段，把它改成下面这样：
+for msg in st.session_state.messages:
+    # 使用你自定义的漂亮函数来渲染每一条历史记录
+    render_message(
+        text=msg["content"], 
+        role=msg["role"], 
+        time_str=msg.get("time", "21:48") # 如果记录里没存时间，就给个默认值
+    )
 
 # 用户输入
+# app.py 里面的核心逻辑（假设你已经导入了 datetime 模块）
+
+# 用户输入框：这一行是必须保留的！
 if prompt := st.chat_input("想对我说点什么吗？"):
-    # 添加用户消息
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
-    
-    # 准备 API 调用
-    try:
-        # 检查 API Key
-        api_key = API_KEY or st.secrets.get("DEEPSEEK_API_KEY", "")
-        if not api_key:
-            st.error("⚠️ 请先配置 DEEPSEEK_API_KEY！点击侧边栏的「API 配置」查看设置方法。")
-        else:
-            # 初始化客户端
-            client = OpenAI(
-                api_key=api_key,
-                base_url=BASE_URL
-            )
-            
-            # 生成系统提示词
-            system_messages = generate_system_prompt(
-                user_desc=st.session_state.user_desc,
-                comfort_style=st.session_state.comfort_style,
-                word_limit=st.session_state.word_limit,
-                forbidden_phrases=st.session_state.forbidden_phrases
-            )
-            
-            # 构建完整消息列表（system + history）
-            api_messages = system_messages + [
-                {"role": m["role"], "content": m["content"]}
-                for m in st.session_state.messages
-            ]
+    current_time = datetime.now().strftime("%H:%M") # 获取当前时间
+
+    # 1. 添加用户消息到 session_state (这一步是保存数据，和 UI 无关，必须保留)
+    st.session_state.messages.append({"role": "user", "content": prompt, "time": current_time})
+
+    # 2. 【关键修改点！】用我们自己定制的 render_message 来显示用户消息
+    #    彻底取代了原来的 `with st.chat_message("user"): st.markdown(prompt)`
+    render_message(text=prompt, role="user", time_str=current_time)
+
+    # 3. AI 思考和回复
+    with st.spinner("EchoSoul 正在感受你的文字..."):
+        try:
+            # 检查 API Key
+            api_key = API_KEY or st.secrets.get("DEEPSEEK_API_KEY", "")
+            if not api_key:
+                st.error("⚠️ 请先配置 DEEPSEEK_API_KEY！点击侧边栏的「API 配置」查看设置方法。")
+            else:
+                from openai import OpenAI
+                import html  # 用于安全渲染网页
+                
+                # 初始化客户端
+                client = OpenAI(
+                    api_key=api_key,
+                    base_url=BASE_URL
+                )
+                
+                # 生成你那完美的高级系统提示词
+                system_messages = generate_system_prompt(
+                    user_desc=st.session_state.user_desc,
+                    comfort_style=st.session_state.comfort_style,
+                    word_limit=st.session_state.word_limit,
+                    forbidden_phrases=st.session_state.forbidden_phrases
+                )
+                
+                # 构建完整消息列表（system + history）
+                api_messages = system_messages + [
+                    {"role": m["role"], "content": m["content"]}
+                    for m in st.session_state.messages
+                ]
+                
+                # ====== 核心UI融合：在星空气泡里实现打字机效果 ======
+                reply_time = datetime.now().strftime("%H:%M")
+                message_placeholder = st.empty() # 创建一个隐形的画板
+                full_response = ""
+                
+                # 这是一个临时小工具，用来把打字的每一帧画成美丽的紫色气泡
+                def make_bubble_html(text_content):
+                    safe_text = "<br>".join(html.escape(line) for line in text_content.split("\n"))
+                    return f"""
+                    <div class="es-row es-row-ai">
+                        <div>
+                            <div class="es-bubble es-bubble-ai">{safe_text}</div>
+                            <div class="es-time es-time-left">{reply_time}</div>
+                        </div>
+                    </div>
+                    """
+                
+                # 流式调用 DeepSeek API
+                stream = client.chat.completions.create(
+                    model=MODEL,
+                    messages=api_messages,
+                    stream=True,
+                    temperature=0.8,
+                    max_tokens=2048
+                )
+                
+                # 开始打字机特效
+                for chunk in stream:
+                    if chunk.choices[0].delta.content is not None:
+                        full_response += chunk.choices[0].delta.content
+                        # 每次拿到一个新字，就重新画一次带闪烁光标(▌)的气泡
+                        message_placeholder.markdown(make_bubble_html(full_response + "▌"), unsafe_allow_html=True)
+                
+                # 打字结束，去掉闪烁光标，定格完美的最终气泡
+                message_placeholder.markdown(make_bubble_html(full_response), unsafe_allow_html=True)
+                
+                # 4. 保存 AI 回复，让它在下次刷新时依然存在
+                st.session_state.messages.append({
+                    "role": "assistant", 
+                    "content": full_response, 
+                    "time": reply_time
+                })
+                
+        except Exception as e:
+            st.error(f"🌟 星辰信号受到干扰，请稍后再试... 错误详情: {e}")    
             
             # 调用 API
             with st.chat_message("assistant"):
@@ -217,9 +279,9 @@ if prompt := st.chat_input("想对我说点什么吗？"):
             # 保存 AI 回复
             st.session_state.messages.append({"role": "assistant", "content": full_response})
     
-    except Exception as e:
-        st.error(f"❌ 出错了：{str(e)}")
-        st.info("💡 请检查 API Key 是否正确，或稍后重试。")
+        except Exception as e:
+            st.error(f"❌ 出错了：{str(e)}")
+            st.info("💡 请检查 API Key 是否正确，或稍后重试。")
 
 # ==================== 空状态提示 ====================
 if not st.session_state.messages:
